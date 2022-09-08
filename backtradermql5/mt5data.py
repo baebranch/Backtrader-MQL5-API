@@ -94,8 +94,12 @@ class MTraderData(with_metaclass(MetaMTraderData, DataBase)):
         should be deactivated"""
         return True
 
-    def __init__(self, **kwargs):
+    def __init__(self, alt=None, alt_compression=None, **kwargs):
         self.o = self._store(**kwargs)
+        self.zone = 60*60*3 # Metatrader native timestamp adjustment
+        self.alt = alt
+        self.alt_compression = alt_compression
+        self.__last = 0
 
     def setenvironment(self, env):
         """Receives an environment (cerebro) and passes it over to the store it
@@ -117,7 +121,8 @@ class MTraderData(with_metaclass(MetaMTraderData, DataBase)):
         self.o.start(data=self)
 
         # Add server script symbol and time frame
-        self.o.config_server(self.p.dataname, self.p.timeframe, self.p.compression)
+        if not self.p.historical: # Only live
+            self.o.config_server(self.p.dataname, self.p.timeframe, self.p.compression)
 
         # Backfill from external data feed
         if self.p.backfill_from is not None:
@@ -139,8 +144,8 @@ class MTraderData(with_metaclass(MetaMTraderData, DataBase)):
             self.p.dataname,
             date_begin,
             date_end,
-            self.p.timeframe,
-            self.p.compression,
+            self.alt if self.alt else self.p.timeframe,
+            self.alt_compression if self.alt_compression else self.p.compression,
             self.p.include_last,
             # self.p.correct_tick_history,
         )
@@ -187,17 +192,20 @@ class MTraderData(with_metaclass(MetaMTraderData, DataBase)):
 
                         self._st_start()
                         continue
-
-                    if (
-                        msg["timeframe"] == self.o.get_granularity(self.p.timeframe, self.p.compression)
-                        and msg["symbol"] == self.p.dataname
-                    ):
-                        if msg["timeframe"] == "TICK":
-                            if self._load_tick(msg["data"]):
-                                return True  # loading worked
-                        else:
-                            if self._load_candle(msg["data"]):
-                                return True  # loading worked
+                    
+                    if msg['type'] == "ASSET":
+                        if (
+                            msg["timeframe"] == self.o.get_granularity(self.p.timeframe, self.p.compression)
+                            and msg["symbol"] == self.p.dataname
+                        ):
+                            if msg["timeframe"] == "TICK":
+                                if self._load_tick(msg["data"]):
+                                    return True  # loading worked
+                            else:
+                                if self._load_candle(msg["data"]):
+                                    return True  # loading worked
+                    elif msg['type'] == "ACCOUNT":
+                        self._load_account(msg["data"])
 
             elif self._state == self._ST_HISTORBACK:
                 msg = self.qhist.get()
@@ -208,7 +216,7 @@ class MTraderData(with_metaclass(MetaMTraderData, DataBase)):
                     self.put_notification(self.DISCONNECTED)
                     self._state = self._ST_OVER
                     return False  # error management cancelled the queue
-                if msg and self.p.timeframe == 1:  # if timeframe is ticks
+                if msg and self.alt == None and self.p.timeframe == 1 or msg and self.alt == 1:  # if timeframe is ticks
                     if self._load_tick(msg):
                         return True  # loading worked
                 elif msg:
@@ -248,17 +256,28 @@ class MTraderData(with_metaclass(MetaMTraderData, DataBase)):
                     self._state = self._ST_OVER
                     return False
 
+    def _load_account(self, msg):
+        """ Updates the cash, equity and free margin in memory
+            This plugin was receiving streaming account balance update
+            So the update was made in the mq5 expert file
+        """
+        self.o._cash = msg[0]
+        self.o._value = msg[1]
+        self.o._free_margin = msg[2]
+    
     def _load_tick(self, msg):
         time_stamp, _bid, _ask = msg
         # Keep timezone of the MetaTRader Tradeserver and convert to date object
         # Convert unix timestamp to float for millisecond resolution
-        d_time = datetime.fromtimestamp(float(time_stamp) / 1000.0)
+        d_time = datetime.fromtimestamp((float(time_stamp) / 1000.0) - self.zone)
 
         dt = date2num(d_time)
 
         # time already seen
-        if dt <= self.lines.datetime[-1]:
+        if dt < self.__last:
             return False
+        else:
+            self.__last = dt
 
         # Common fields
         self.lines.datetime[0] = dt
@@ -277,7 +296,7 @@ class MTraderData(with_metaclass(MetaMTraderData, DataBase)):
     def _load_candle(self, ohlcv):
         time_stamp, _open, _high, _low, _close, _volume, _spread = ohlcv
         # Keep timezone of the MetaTRader Tradeserver and convert to date object
-        d_time = datetime.fromtimestamp(time_stamp)
+        d_time = datetime.fromtimestamp(time_stamp - self.zone)
 
         dt = date2num(d_time)
 

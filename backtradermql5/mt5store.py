@@ -1,19 +1,21 @@
 from __future__ import absolute_import, division, print_function, unicode_literals
 
 import zmq
-import collections
-from datetime import datetime
+import json
+import time
+import random
+import logging
 import threading
-
-from backtradermql5.adapter import PositionAdapter
+import collections
+from datetime import datetime, timedelta
 
 import backtrader as bt
-from backtrader.metabase import MetaParams
-from backtrader.utils.py3 import queue, with_metaclass
 from backtrader import date2num, num2date
+from backtrader.metabase import MetaParams
+from backtradermql5.adapter import PositionAdapter
+from backtrader.utils.py3 import queue, with_metaclass
 
-import random
-import json
+logger = logging.getLogger('rivver')
 
 
 class MTraderError(Exception):
@@ -102,6 +104,10 @@ class MTraderAPI:
             # set port timeout
             # TODO check if port is listening and error handling
             self.chart_data_socket.connect("tcp://{}:{}".format(self.HOST, self.CHART_DATA_PORT))
+
+            # Required to lock socket access as zmq isn't thread safe
+            # and some sockets used in multiple threads
+            self.lock = threading.RLock()
 
         except zmq.ZMQError:
             raise zmq.ZMQBindError("Binding ports ERROR")
@@ -205,11 +211,10 @@ class MTraderAPI:
             else:
                 raise KeyError("Unknown key in **kwargs ERROR")
 
-        # send dict to server
-        self._send_request(request)
-
-        # return server reply
-        return self._pull_reply()
+        # send dict to server and return server reply
+        with self.lock:
+            self._send_request(request)
+            return self._pull_reply()
 
     def indicator_construct_and_send(self, **kwargs) -> dict:
         """Construct a request dictionary from default and send it to server"""
@@ -296,7 +301,7 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
     BrokerCls = None  # broker class will autoregister
     DataCls = None  # data class will auto register
 
-    params = (("host", "localhost"), ("debug", False), ("datatimeout", 10))
+    params = (("host", "localhost"), ("debug", False), ("datatimeout", 100))
 
     _DTEPOCH = datetime(1970, 1, 1)
 
@@ -344,6 +349,7 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
     def __init__(self, *args, **kwargs):
         super(MTraderStore, self).__init__()
 
+        self.zone = 60*60*3 # Metatrader native timestamp adjustment
         self.notifs = collections.deque()  # store notifications for cerebro
 
         self._env = None  # reference to cerebro for general notifications
@@ -433,6 +439,9 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
 
     def get_value(self):
         return self._value
+    
+    def get_free_margin(self):
+        return self._free_margin
 
     def get_balance(self):
         try:
@@ -446,6 +455,7 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
         try:
             self._cash = float(bal["balance"])
             self._value = float(bal["equity"])
+            return bal
         except KeyError:
             pass
 
@@ -623,9 +633,9 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
 
         begin = end = None
         if dtbegin:
-            begin = int((dtbegin - self._DTEPOCH).total_seconds())
+            begin = time.mktime((dtbegin + timedelta(seconds=self.zone)).timetuple())
         if dtend:
-            end = int((dtend - self._DTEPOCH).total_seconds())
+            end = time.mktime((dtbegin + timedelta(seconds=self.zone)).timetuple())
 
         if self.debug:
             print("Fetching: {}, Timeframe: {}, Fromdate: {}".format(dataname, tf, dtbegin))
@@ -648,6 +658,7 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
             except:
                 pass
 
+        price_data.sort()
         q = queue.Queue()
         for c in price_data:
             q.put(c)
@@ -693,7 +704,8 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
             raise ServerDataError(conf)
 
         for key, value in conf.items():
-            print(key, value, sep=" - ")
+            logger.warn(f"{key} - {value}")
+        return conf
 
     def close_position(self, oid, symbol):
         if self.debug:

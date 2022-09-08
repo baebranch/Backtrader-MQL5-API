@@ -106,11 +106,26 @@ class MTraderBroker(with_metaclass(MetaMTraderBroker, BrokerBase)):
     def stop(self):
         super(MTraderBroker, self).stop()
         self.o.stop()
+    
+    def checkaccount(self):
+        self.account = self.o.check_account()
+        return self.account
+
+    def get_value_lever(self):
+        self.free_margin = self.o.get_free_margin()
+        return self.free_margin
+
+    def get_leverage(self):
+        self.leverage = self.o.check_account()['leverage']
+        return self.leverage
 
     def getcash(self):
         # This call cannot block if no answer is available from MTrader
         self.cash = cash = self.o.get_cash()
         return cash
+
+    def get_value(self, datas=None):
+        return getvalue()
 
     def getvalue(self, datas=None):
         self.value = self.o.get_value()
