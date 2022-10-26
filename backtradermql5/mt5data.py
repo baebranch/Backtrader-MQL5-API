@@ -266,7 +266,7 @@ class MTraderData(with_metaclass(MetaMTraderData, DataBase)):
         self.o._free_margin = msg[2]
     
     def _load_tick(self, msg):
-        time_stamp, _bid, _ask = msg
+        time_stamp, _bid, _ask, _vol = msg
         # Keep timezone of the MetaTRader Tradeserver and convert to date object
         # Convert unix timestamp to float for millisecond resolution
         d_time = datetime.fromtimestamp((float(time_stamp) / 1000.0) - self.zone)
@@ -281,7 +281,7 @@ class MTraderData(with_metaclass(MetaMTraderData, DataBase)):
 
         # Common fields
         self.lines.datetime[0] = dt
-        self.lines.volume[0] = 0.0
+        self.lines.volume[0] = _vol
         self.lines.openinterest[0] = 0.0
 
         # Put the prices into the bar
