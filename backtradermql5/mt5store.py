@@ -16,7 +16,8 @@ from backtradermql5.adapter import PositionAdapter
 from backtrader.utils.py3 import queue, with_metaclass
 
 logger = logging.getLogger('rivver')
-
+order_lock = threading.RLock()
+socket_lock = threading.RLock()
 
 class MTraderError(Exception):
     def __init__(self, *args, **kwargs):
@@ -107,7 +108,6 @@ class MTraderAPI:
 
             # Required to lock socket access as zmq isn't thread safe
             # and some sockets used in multiple threads
-            self.lock = threading.RLock()
 
         except zmq.ZMQError:
             raise zmq.ZMQBindError("Binding ports ERROR")
@@ -212,7 +212,7 @@ class MTraderAPI:
                 raise KeyError("Unknown key in **kwargs ERROR")
 
         # send dict to server and return server reply
-        with self.lock:
+        with socket_lock:
             self._send_request(request)
             return self._pull_reply()
 
@@ -568,25 +568,26 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
 
             oref, okwargs = msg
 
-            try:
-                o = self.oapi.construct_and_send(**okwargs)
-            except Exception as e:
-                self.put_notification(e)
-                self.broker._reject(oref)
-                return
+            with order_lock:
+                try:
+                    o = self.oapi.construct_and_send(**okwargs)
+                except Exception as e:
+                    self.put_notification(e)
+                    self.broker._reject(oref)
+                    return
 
-            if self.debug:
-                print(o)
+                if self.debug:
+                    print(o)
 
-            if o["error"]:
-                self.put_notification(o["desription"])
-                self.broker._reject(oref)
-                return
-            else:
-                oid = o["order"]
+                if o["error"]:
+                    self.put_notification(o["desription"])
+                    self.broker._reject(oref)
+                    return
+                else:
+                    oid = o["order"]
 
-            self._orders[oref] = oid
-            self.broker._submit(oref)
+                self._orders[oref] = oid
+                self.broker._submit(oref)
 
             # keeps orders types
             self._orders_type[oref] = okwargs["actionType"]
@@ -765,7 +766,9 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
         # except KeyError:
         #     raise KeyError(oid)
 
-        if oid in self._orders.values():
+        with order_lock:
+            orders = self._orders.values()
+        if oid in orders:
             # when an order id exists process transaction
             self._process_transaction(oid, request, reply)
         else:
