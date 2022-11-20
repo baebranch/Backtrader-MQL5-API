@@ -96,7 +96,7 @@ class MTraderData(with_metaclass(MetaMTraderData, DataBase)):
 
     def __init__(self, alt=None, alt_compression=None, **kwargs):
         self.o = self._store(**kwargs)
-        self.zone = 60*60*3 # Metatrader native timestamp adjustment
+        self.zone = 60*60*2 # Metatrader native timestamp adjustment
         self.alt = alt
         self.alt_compression = alt_compression
         self.__last = 0
@@ -264,9 +264,11 @@ class MTraderData(with_metaclass(MetaMTraderData, DataBase)):
         self.o._cash = msg[0]
         self.o._value = msg[1]
         self.o._free_margin = msg[2]
+        # TODO find better place for this expression
+        self.zone = self.o.zone
     
     def _load_tick(self, msg):
-        time_stamp, _bid, _ask, _vol = msg
+        time_stamp, _bid, _ask, _volume, _spread = msg
         # Keep timezone of the MetaTRader Tradeserver and convert to date object
         # Convert unix timestamp to float for millisecond resolution
         d_time = datetime.fromtimestamp((float(time_stamp) / 1000.0) - self.zone)
@@ -281,7 +283,8 @@ class MTraderData(with_metaclass(MetaMTraderData, DataBase)):
 
         # Common fields
         self.lines.datetime[0] = dt
-        self.lines.volume[0] = _vol
+        self.lines.volume[0] = _volume
+        self.lines.spread[0] = _spread
         self.lines.openinterest[0] = 0.0
 
         # Put the prices into the bar
@@ -316,5 +319,6 @@ class MTraderData(with_metaclass(MetaMTraderData, DataBase)):
         self.lines.low[0] = _low if not self.p.addspread else addspread(_low, _spread)
         self.lines.close[0] = _close if not self.p.addspread else addspread(_close, _spread)
         self.lines.volume[0] = _volume
+        self.lines.spread[0] = _spread
         self.lines.openinterest[0] = 0.0
         return True

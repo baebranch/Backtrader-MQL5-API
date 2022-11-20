@@ -359,6 +359,7 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
         self._orders = collections.OrderedDict()  # map order.ref to oid
         self._ordersrev = collections.OrderedDict()  # map oid to order.ref
         self._orders_type = dict()  # keeps order types
+        self._account_start_up = True # Outputs account data on startup
 
         kwargs.update(
             {
@@ -380,6 +381,7 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
 
         # Clear any previous subscribed Symbols
         self.reset_server()
+        self.check_account()
 
     def start(self, data=None, broker=None):
         # Datas require some processing to kickstart data reception
@@ -400,6 +402,14 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
             self.broker_threads()
             self.streaming_events()
 
+    def set_daylight_savings_offset(self, daylight):
+        """ Metatrader5 uses daylight savings time
+            which could offset the local charts and tracking
+            Adjustments happend on weekends 
+        """
+        if daylight: self.zone = 60*60*2
+        else: self.zone = 60*60*3
+    
     def stop(self):
         # signal end of thread
         if self.broker is not None:
@@ -704,8 +714,13 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
         if conf["error"]:
             raise ServerDataError(conf)
 
-        for key, value in conf.items():
-            logger.warn(f"{key} - {value}")
+        # for key, value in conf.items():
+        #     logger.warn(f"{key} - {value}")
+        if self._account_start_up:
+            self._account_start_up = False
+            logger.warn(str(conf))
+        logger.debug(str(conf))
+        self.set_daylight_savings_offset(conf['daylight_savings'])
         return conf
 
     def close_position(self, oid, symbol):
