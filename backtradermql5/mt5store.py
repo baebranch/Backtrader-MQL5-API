@@ -718,9 +718,9 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
         #     logger.warn(f"{key} - {value}")
         if self._account_start_up:
             self._account_start_up = False
-            logger.warn(str(conf))
+            logger.debug(str(conf))
         logger.debug(str(conf))
-        self.set_daylight_savings_offset(conf['daylight_savings'])
+        self.set_daylight_savings_offset(conf.get('daylight_savings', False))
         return conf
 
     def close_position(self, oid, symbol):

@@ -153,6 +153,21 @@ class MTraderData(with_metaclass(MetaMTraderData, DataBase)):
         self._state = self._ST_HISTORBACK
 
         return True
+    
+    def return_data(self):
+        date_begin = self.p.fromdate if self.p.fromdate and date2num(self.p.fromdate) > float("-inf") else None
+        date_end = self.p.todate if self.p.todate and date2num(self.p.todate) < float("inf") else None
+
+        data = self.o.price_data(
+            self.p.dataname,
+            date_begin,
+            date_end,
+            self.alt if self.alt else self.p.timeframe,
+            self.alt_compression if self.alt_compression else self.p.compression,
+            self.p.include_last,
+            # self.p.correct_tick_history,
+        )
+        return data
 
     def stop(self):
         """Stops and tells the store to stop"""
