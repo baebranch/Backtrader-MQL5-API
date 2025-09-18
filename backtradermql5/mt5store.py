@@ -4,18 +4,19 @@ import zmq
 import json
 import time
 import random
-import logging
+# import logging
 import threading
 import collections
-from datetime import datetime, timedelta
+from dateutil.parser import parse
+from datetime import datetime, timedelta, timezone
 
 import backtrader as bt
+from utility.logger import logger
 from backtrader import date2num, num2date
 from backtrader.metabase import MetaParams
 from backtradermql5.adapter import PositionAdapter
 from backtrader.utils.py3 import queue, with_metaclass
 
-logger = logging.getLogger('rivver')
 order_lock = threading.RLock()
 socket_lock = threading.RLock()
 
@@ -75,6 +76,7 @@ class MTraderAPI:
         self.INDICATOR_DATA_PORT = 15559  # REP/REQ port
         self.CHART_DATA_PORT = 15560  # PUSH port
         self.debug = kwargs["debug"]
+        self._nonce = 0
 
         # ZeroMQ timeout in seconds
         sys_timeout = 1
@@ -111,6 +113,11 @@ class MTraderAPI:
 
         except zmq.ZMQError:
             raise zmq.ZMQBindError("Binding ports ERROR")
+    
+    def nonce(self):
+        """ Generate a nonce for each new request """
+        self._nonce += 1
+        return self._nonce
 
     def _send_request(self, data: dict) -> None:
         """Send request to server via ZeroMQ System socket"""
@@ -118,8 +125,8 @@ class MTraderAPI:
             self.sys_socket.send_json(data)
             msg = self.sys_socket.recv_string()
 
-            if self.debug:
-                print("ZMQ SYS REQUEST: ", data, " -> ", msg)
+            # print("ZMQ SYS REQUEST: ", data, " -> ", msg)
+            logger.debug(f"ZQM SYS REQUEST: {data} -> {msg}")
             # terminal received the request
             assert msg == "OK", "Something wrong on server side"
         except AssertionError as err:
@@ -133,8 +140,7 @@ class MTraderAPI:
             msg = self.data_socket.recv_json()
         except zmq.ZMQError:
             raise zmq.NotDone("Data socket timeout ERROR")
-        if self.debug:
-            print("ZMQ DATA REPLY: ", msg)
+        logger.trace(f"ZMQ DATA REPLY: {msg}")
         return msg
 
     def _indicator_pull_reply(self):
@@ -349,7 +355,9 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
     def __init__(self, *args, **kwargs):
         super(MTraderStore, self).__init__()
 
-        self.zone = 60*60*3 # Metatrader native timestamp adjustment
+        self.timezone = None
+        self.throttle_time = 0.05  # seconds
+        self.last_throttle = time.time()
         self.notifs = collections.deque()  # store notifications for cerebro
 
         self._env = None  # reference to cerebro for general notifications
@@ -402,14 +410,40 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
             self.broker_threads()
             self.streaming_events()
 
-    def set_daylight_savings_offset(self, daylight):
-        """ Metatrader5 uses daylight savings time
+    def set_timezone_offset(self, conf):
+        """ Some Metatrader5 Brokers uses daylight savings time
             which could offset the local charts and tracking
-            Adjustments happend on weekends 
+            Adjustments should happend on weekends 
         """
-        if daylight: self.zone = 60*60*2
-        else: self.zone = 60*60*3
+        # Server time is typically UTC+2
+        # May or maynot be using Daylight savings time
+        # Unix timestamps are based on naive server time
+        self.gmt_time = parse(conf.get('gmt_time', '1970-01-01T00:00:00Z'))
+        self.server_time = parse(conf.get('server_time', '1970-01-01T00:00:00Z'))
+        self.unix = int(conf.get('unix_time', 0))
+        self.unix_time = datetime.fromtimestamp(self.unix, timezone.utc)
+        self.server_offset = self.server_time - self.gmt_time # Chart timezone offset
+        self.timezone = timezone(timedelta(hours=round(self.server_offset.total_seconds() / 3600))) # Round to nearest hour for timezone object
+        self.server_time = self.server_time.replace(tzinfo=self.timezone) # Make server time timezone aware
+        self.daylight_savings = abs(conf.get('daylight_savings_offset', 0)) # Daylight savings offset in seconds
+        # TO DO: Apply daylight savings offset
+        self.gmt_time = self.gmt_time.replace(tzinfo=timezone.utc) # Make gmt time timezone aware
+        self.offset = (self.unix_time - self.gmt_time).total_seconds() - self.daylight_savings # Amount to offset the returned unix timestamps by
     
+    def throttle(self, extend=False) -> None:
+        """ Simple throttle to avoid overloading the broker
+            Metatrader 5 seems to complain about too many requests if orders are submitted too quickly
+        """
+        if extend:
+            if self.throttle_time < 0.5:
+                self.throttle_time += 0.05 # Increase throttle time slightly each time to a max of 0.5s
+                logger.debug(f'Extending throttle time to {self.throttle_time} seconds')
+        # elif (time.time() - self.last_throttle) < self.throttle_time:
+        else:
+            logger.debug(f'Throttling for {self.throttle_time} seconds')
+            time.sleep(self.throttle_time)
+            self.last_throttle = time.time()
+
     def stop(self):
         # signal end of thread
         if self.broker is not None:
@@ -430,8 +464,7 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
         # if positions["error"]:
         #     raise ServerDataError(positions)
         pos_list = positions.get("positions", [])
-        if self.debug:
-            print("Open positions: {}.".format(pos_list))
+        logger.debug(f"Open positions: {pos_list}")
         return [PositionAdapter(o) for o in pos_list]
 
     def get_granularity(self, frame, compression):
@@ -482,8 +515,7 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
         while True:
             try:
                 last_data = socket.recv_json()
-                if self.debug:
-                    print("ZMQ LIVE DATA: ", last_data)
+                logger.trace("ZMQ LIVE DATA: %s", last_data)
             except zmq.ZMQError:
                 raise zmq.NotDone("Live data ERROR")
 
@@ -495,8 +527,7 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
         while True:
             try:
                 transaction = socket.recv_json()
-                if self.debug:
-                    print("ZMQ STREAMING TRANSACTION: ", transaction)
+                logger.trace("ZMQ STREAMING TRANSACTION: %s", transaction)
             except zmq.ZMQError:
                 raise zmq.NotDone("Streaming data ERROR")
 
@@ -578,31 +609,39 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
 
             oref, okwargs = msg
 
-            with order_lock:
-                try:
-                    o = self.oapi.construct_and_send(**okwargs)
-                except Exception as e:
-                    self.put_notification(e)
-                    self.broker._reject(oref)
-                    return
+            for _ in range(3):  # try 3 times
+                self.throttle()
+                with order_lock:
+                    try:
+                        o = self.oapi.construct_and_send(**okwargs)
+                        logger.debug(f'ORDER CREATE RESPONSE: {o}')
+                    except Exception as e:
+                        self.put_notification(e)
+                        self.broker._reject(oref)
+                        logger.error(f'ORDER CREATE ERROR: {e}')
+                        break
+                
+                    # If error then throttle and try again
+                    if o['error'] and o["description"] == "TRADE_RETCODE_TOO_MANY_REQUESTS":
+                        self.throttle(extend=True)
+                        continue
 
-                if self.debug:
-                    print(o)
+                    # successful
+                    if not o["error"]: break
 
-                if o["error"]:
-                    self.put_notification(o["desription"])
-                    self.broker._reject(oref)
-                    return
-                else:
-                    oid = o["order"]
+            if o["error"]:
+                self.put_notification(o["description"])
+                self.broker._reject(oref)
+            else:
+                oid = o["order"]
 
                 self._orders[oref] = oid
                 self.broker._submit(oref)
 
-            # keeps orders types
-            self._orders_type[oref] = okwargs["actionType"]
-            # maps ids to backtrader order
-            self._ordersrev[oid] = oref
+                # keeps orders types
+                self._orders_type[oref] = okwargs["actionType"]
+                # maps ids to backtrader order
+                self._ordersrev[oid] = oref
 
     def order_cancel(self, order):
         self.q_orderclose.put(order.ref)
@@ -644,12 +683,11 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
 
         begin = end = None
         if dtbegin:
-            begin = time.mktime((dtbegin + timedelta(seconds=self.zone)).timetuple())
+            begin = time.mktime((dtbegin - timedelta(seconds=self.offset)).timetuple())
         if dtend:
-            end = time.mktime((dtbegin + timedelta(seconds=self.zone)).timetuple())
+            end = time.mktime((dtend - timedelta(seconds=self.offset)).timetuple())
 
-        if self.debug:
-            print("Fetching: {}, Timeframe: {}, Fromdate: {}".format(dataname, tf, dtbegin))
+        logger.debug(f"Fetching: {dataname}, Timeframe: {tf}, Fromdate: {dtbegin}")
 
         data = self.oapi.construct_and_send(
             action="HISTORY",
@@ -718,24 +756,23 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
         #     logger.warn(f"{key} - {value}")
         if self._account_start_up:
             self._account_start_up = False
-            logger.debug(str(conf))
+
+        # Set timezone and daylight savings offsets
         logger.debug(str(conf))
-        self.set_daylight_savings_offset(conf.get('daylight_savings', False))
+        self.set_timezone_offset(conf)
         return conf
 
     def close_position(self, oid, symbol):
-        if self.debug:
-            print("Closing position: {}, on symbol: {}".format(oid, symbol))
+        logger.debug(f"Closing position: {oid}, on symbol: {symbol}")
 
         conf = self.oapi.construct_and_send(action="TRADE", actionType="POSITION_CLOSE_ID", symbol=symbol, id=oid)
-        print(conf)
+        logger.debug(f"Close position response: {conf}")
         # Error handling
         if conf["error"]:
             raise ServerDataError(conf)
 
     def cancel_order(self, oid, symbol):
-        if self.debug:
-            print("Cancelling order: {}, on symbol: {}".format(oid, symbol))
+        logger.debug(f"Cancelling order: {oid}, on symbol: {symbol}")
 
         conf = self.oapi.construct_and_send(action="TRADE", actionType="ORDER_CANCEL", symbol=symbol, id=oid)
         # Error handling
@@ -753,8 +790,7 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
         # Update balance after transaction
         # self.get_balance()
 
-        if self.debug:
-            print(request, reply, sep="\n")
+        logger.debug(f"Transaction: {request},\n Reply: {reply}")
 
         if request["action"] == "TRADE_ACTION_DEAL":
             # get order id (matches transaction id)
@@ -801,10 +837,21 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
                         break
 
     def _process_transaction(self, oid, request, reply):
-        try:
-            # get a reference to a backtrader order based on the order id / trade id
-            oref = self._ordersrev[oid]
-        except KeyError:
+        # try:
+        #     # get a reference to a backtrader order based on the order id / trade id
+        #     oref = self._ordersrev[oid]
+        # except KeyError:
+        #     return
+        oref = None
+        for _ in range(5):
+          if oref is None:
+              oref = self._ordersrev.get(oid, None)
+              time.sleep(0.2)
+          else:
+              break
+        
+        if oref is None:
+            logger.error(f"Order reference not found for order id: {oid}")
             return
 
         if request["action"] == "TRADE_ACTION_PENDING":

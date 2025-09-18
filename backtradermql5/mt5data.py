@@ -1,6 +1,6 @@
 from __future__ import absolute_import, division, print_function, unicode_literals
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from backtrader.feed import DataBase
 from backtrader import date2num, num2date
@@ -96,10 +96,14 @@ class MTraderData(with_metaclass(MetaMTraderData, DataBase)):
 
     def __init__(self, alt=None, alt_compression=None, **kwargs):
         self.o = self._store(**kwargs)
-        self.zone = 60*60*2 # Metatrader native timestamp adjustment
         self.alt = alt
         self.alt_compression = alt_compression
         self.__last = 0
+    
+    # def _gettz(self):
+    #     '''To be overriden by subclasses which may auto-calculate the
+    #     timezone'''
+    #     return self.o.timezone
 
     def setenvironment(self, env):
         """Receives an environment (cerebro) and passes it over to the store it
@@ -279,14 +283,12 @@ class MTraderData(with_metaclass(MetaMTraderData, DataBase)):
         self.o._cash = msg[0]
         self.o._value = msg[1]
         self.o._free_margin = msg[2]
-        # TODO find better place for this expression
-        self.zone = self.o.zone
     
     def _load_tick(self, msg):
         time_stamp, _bid, _ask, _volume, _spread = msg
         # Keep timezone of the MetaTRader Tradeserver and convert to date object
         # Convert unix timestamp to float for millisecond resolution
-        d_time = datetime.fromtimestamp((float(time_stamp) / 1000.0) - self.zone)
+        d_time = datetime.fromtimestamp((float(time_stamp) / 1000.0) - self.o.offset , timezone.utc)
 
         dt = date2num(d_time)
 
@@ -314,7 +316,7 @@ class MTraderData(with_metaclass(MetaMTraderData, DataBase)):
     def _load_candle(self, ohlcv):
         time_stamp, _open, _high, _low, _close, _volume, _spread = ohlcv
         # Keep timezone of the MetaTRader Tradeserver and convert to date object
-        d_time = datetime.fromtimestamp(time_stamp - self.zone)
+        d_time = datetime.fromtimestamp(time_stamp - self.o.offset, timezone.utc)
 
         dt = date2num(d_time)
 
