@@ -387,9 +387,10 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
 
         self.debug = self.params.debug
 
-        # Clear any previous subscribed Symbols
-        self.reset_server()
-        self.check_account()
+        # Clear any previous subscribed Symbols & check account if online
+        if kwargs.get('online', True):
+          self.reset_server()
+          self.check_account()
 
     def start(self, data=None, broker=None):
         # Datas require some processing to kickstart data reception
